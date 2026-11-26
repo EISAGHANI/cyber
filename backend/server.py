@@ -4,11 +4,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional, Tuple
 from dotenv import load_dotenv
 from agents import Agent, Runner, trace
 
-from context import SECURITY_RESEARCHER_INSTRUCTIONS, get_analysis_prompt, enhance_summary
+from context import (
+    get_security_researcher_instructions,
+    get_analysis_prompt,
+    enhance_summary,
+    resolve_language_and_suffix,
+)
 from mcp_servers import create_semgrep_server
 
 load_dotenv(override=True)
@@ -38,6 +43,14 @@ app.add_middleware(
 
 class AnalyzeRequest(BaseModel):
     code: str
+    language: Optional[str] = Field(
+        default=None,
+        description="Language identifier (e.g., 'csharp', 'python', 'typescript', 'auto')",
+    )
+    filename: Optional[str] = Field(
+        default=None,
+        description="Optional filename used to infer language and file extension for Semgrep",
+    )
 
 
 class SecurityIssue(BaseModel):
@@ -70,37 +83,40 @@ def check_api_keys() -> None:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured")
 
 
-def create_security_agent(semgrep_server) -> Agent:
+def create_security_agent(semgrep_server, language_key: str, language_label: str) -> Agent:
     """Create and configure the security analysis agent."""
     return Agent(
         name="Security Researcher",
-        instructions=SECURITY_RESEARCHER_INSTRUCTIONS,
+        instructions=get_security_researcher_instructions(language_key, language_label),
         model="gpt-4.1-mini",
         mcp_servers=[semgrep_server],
         output_type=SecurityReport,
     )
 
 
-async def run_security_analysis(code: str) -> SecurityReport:
+async def run_security_analysis(
+    code: str, language: Optional[str] = None, filename: Optional[str] = None
+) -> Tuple[SecurityReport, str]:
     """Execute the security analysis workflow."""
+    lang_key, lang_label, suffix = resolve_language_and_suffix(language, filename, code)
+
     with trace("Security Researcher"):
         async with create_semgrep_server() as semgrep:
-            agent = create_security_agent(semgrep)
+            agent = create_security_agent(semgrep, lang_key, lang_label)
             try:
-                with tempfile.NamedTemporaryFile(  # Creates a temporary file locally with teh code
-                    mode="w", suffix=".py", delete=False
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=suffix, encoding="utf-8", delete=False
                 ) as temp:
                     temp.write(code)
                     temp_path = temp.name
                 try:
                     result = await Runner.run(
-                        agent, input=get_analysis_prompt(code, temp_path)
-                    )  # Sends code and path to the file
-                    # Changed the following two lines to sort by CVSS in descending order
+                        agent, input=get_analysis_prompt(code, temp_path, lang_label)
+                    )
                     sorted_report = result.final_output_as(SecurityReport)
                     sorted_report.issues.sort(key=lambda issue: issue.cvss_score, reverse=True)
 
-                    return sorted_report
+                    return sorted_report, lang_label
                 finally:
                     try:
                         os.unlink(temp_path)
@@ -111,26 +127,29 @@ async def run_security_analysis(code: str) -> SecurityReport:
                 raise
 
 
-def format_analysis_response(code: str, report: SecurityReport) -> SecurityReport:
+def format_analysis_response(
+    code: str, report: SecurityReport, language_label: str
+) -> SecurityReport:
     """Format the final analysis response."""
-    enhanced_summary = enhance_summary(len(code), report.summary)
+    enhanced_summary = enhance_summary(len(code), report.summary, language_label)
     return SecurityReport(summary=enhanced_summary, issues=report.issues)
 
 
 @app.post("/api/analyze", response_model=SecurityReport)
 async def analyze_code(request: AnalyzeRequest) -> SecurityReport:
     """
-    Analyze Python code for security vulnerabilities using OpenAI Agents and Semgrep.
+    Analyze source code for security vulnerabilities using OpenAI Agents and Semgrep.
 
-    This endpoint combines static analysis via Semgrep with AI-powered security analysis
-    to provide comprehensive vulnerability detection and remediation guidance.
+    Supports C# (.NET), Python, TypeScript/JavaScript, Java, Go, C/C++, PHP, Ruby, Rust, and more.
     """
     validate_request(request)
     check_api_keys()
 
     try:
-        report = await run_security_analysis(request.code)
-        return format_analysis_response(request.code, report)
+        report, lang_label = await run_security_analysis(
+            request.code, request.language, request.filename
+        )
+        return format_analysis_response(request.code, report, lang_label)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 

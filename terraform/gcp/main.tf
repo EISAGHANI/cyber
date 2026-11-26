@@ -35,51 +35,12 @@ resource "google_project_service" "cloudbuild" {
   disable_on_destroy = false
 }
 
-# Configure Docker provider to use GCR
-provider "docker" {
-  registry_auth {
-    address  = "${var.region}-docker.pkg.dev"
-    username = "oauth2accesstoken"
-    password = data.google_client_config.default.access_token
-  }
-}
-
-# Get current project configuration
-data "google_client_config" "default" {}
-
 # Create Artifact Registry repository
 resource "google_artifact_registry_repository" "app" {
   location      = var.region
   repository_id = var.service_name
   format        = "DOCKER"
   description   = "Docker repository for ${var.service_name}"
-}
-
-# Build Docker image
-resource "docker_image" "app" {
-  name = "${var.region}-docker.pkg.dev/${var.project_id}/${var.service_name}/${var.service_name}:${var.docker_image_tag}"
-
-  build {
-    context    = "${path.module}/../.."
-    dockerfile = "Dockerfile"
-    platform   = "linux/amd64"
-    no_cache   = true
-  }
-
-  depends_on = [
-    google_project_service.cloudbuild,
-    google_artifact_registry_repository.app
-  ]
-}
-
-# Push Docker image to Artifact Registry
-resource "docker_registry_image" "app" {
-  name = docker_image.app.name
-  
-  depends_on = [
-    google_artifact_registry_repository.app,
-    docker_image.app
-  ]
 }
 
 # Deploy to Cloud Run
@@ -90,7 +51,7 @@ resource "google_cloud_run_service" "app" {
   template {
     spec {
       containers {
-        image = docker_image.app.name
+        image = "${var.region}-docker.pkg.dev/${var.project_id}/${var.service_name}/${var.service_name}:${var.docker_image_tag}"
 
         resources {
           limits = {
@@ -141,7 +102,7 @@ resource "google_cloud_run_service" "app" {
 
   depends_on = [
     google_project_service.cloudrun,
-    docker_registry_image.app
+    google_artifact_registry_repository.app
   ]
 }
 

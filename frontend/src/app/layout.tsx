@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Cybersecurity Analyst",
-  description: "Professional Python code analysis tool for cybersecurity analysis",
+  description: "Multi-language code security analyzer supporting C# (.NET), Python, TypeScript, Java, Go, and more",
 };
 
 export default function RootLayout({
